@@ -1,0 +1,5 @@
+import { defineConfig } from 'vite'; import react from '@vitejs/plugin-react'; import { VitePWA } from 'vite-plugin-pwa';
+export default defineConfig({
+ plugins:[react(),VitePWA({registerType:'autoUpdate',includeAssets:['icons/icon-192.png','icons/icon-512.png'],manifest:{name:'Leafmark Reading Journal',short_name:'Leafmark',description:'A private reading and writing journal for growing readers.',theme_color:'#f4efe4',background_color:'#f4efe4',display:'standalone',orientation:'any',start_url:'/',scope:'/',icons:[{src:'/icons/icon-192.png',sizes:'192x192',type:'image/png'},{src:'/icons/icon-512.png',sizes:'512x512',type:'image/png'}]},workbox:{navigateFallback:'/index.html',globPatterns:['**/*.{js,css,html,png,svg,woff2}'],runtimeCaching:[{urlPattern:/^https:\/\/covers\.openlibrary\.org\//,handler:'CacheFirst',options:{cacheName:'book-covers',expiration:{maxEntries:80,maxAgeSeconds:60*60*24*30}}}]}})],
+ server:{proxy:{'/api':'http://127.0.0.1:8787','/health':'http://127.0.0.1:8787'}},preview:{port:4173}
+});

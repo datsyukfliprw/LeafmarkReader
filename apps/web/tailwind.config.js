@@ -1,0 +1,1 @@
+export default {content:['./index.html','./src/**/*.{ts,tsx}'],theme:{extend:{fontFamily:{sans:['Avenir Next','Nunito Sans','system-ui','sans-serif'],serif:['Iowan Old Style','Palatino Linotype','Book Antiqua','Georgia','serif']}}},plugins:[]};

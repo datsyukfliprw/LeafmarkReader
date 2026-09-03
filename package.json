@@ -1,0 +1,27 @@
+{
+  "name": "leafmark-reader",
+  "private": true,
+  "version": "1.0.0",
+  "packageManager": "npm@10.9.2",
+  "workspaces": ["apps/*", "packages/*"],
+  "scripts": {
+    "dev": "concurrently -n server,web -c auto \"npm run dev -w @leafmark/server\" \"npm run dev -w @leafmark/web\"",
+    "build": "npm run build -ws --if-present",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "eval:ai": "tsx tests/ai-evals/run.ts",
+    "db:migrate": "npm run db:migrate -w @leafmark/server",
+    "start": "npm run start -w @leafmark/server",
+    "backup": "node scripts/backup.mjs",
+    "restore": "node scripts/restore.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.55.0",
+    "@types/node": "^22.10.0",
+    "concurrently": "^9.1.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.2.0"
+  }
+}

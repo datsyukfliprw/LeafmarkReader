@@ -1,0 +1,21 @@
+[Unit]
+Description=Leafmark local reading journal
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/leafmark
+EnvironmentFile=/opt/leafmark/.env
+ExecStart=/usr/bin/npm start
+Restart=on-failure
+RestartSec=3
+User=leafmark
+Group=leafmark
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/leafmark/data /opt/leafmark/backups
+
+[Install]
+WantedBy=multi-user.target

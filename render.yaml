@@ -1,0 +1,36 @@
+services:
+  - type: web
+    name: leafmark-reader
+    runtime: node
+    plan: starter
+    region: ohio
+    buildCommand: npm install --include=dev && npm run build
+    startCommand: APP_ORIGIN=$RENDER_EXTERNAL_URL npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: 22.14.0
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: DATABASE_PATH
+        value: /var/data/leafmark.sqlite
+      - key: COOKIE_SECRET
+        generateValue: true
+      - key: PARENT_PIN
+        sync: false
+      - key: CHILDREN
+        sync: false
+      - key: LOCAL_AI_MODEL
+        value: Bonsai-27B
+      - key: AI_TIMEOUT_MS
+        value: "1000"
+      - key: BOOK_METADATA_TIMEOUT_MS
+        value: "4500"
+      - key: BACKUP_DIR
+        value: /var/data/backups
+    disk:
+      name: leafmark-data
+      mountPath: /var/data
+      sizeGB: 1

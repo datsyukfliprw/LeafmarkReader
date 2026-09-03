@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "noUncheckedIndexedAccess": true,
+    "baseUrl": ".",
+    "paths": {
+      "@leafmark/schemas": ["packages/schemas/src/index.ts"],
+      "@leafmark/shared": ["packages/shared/src/index.ts"],
+      "@leafmark/pedagogy": ["packages/pedagogy/src/index.ts"],
+      "@leafmark/ai": ["packages/ai/src/index.ts"]
+    }
+  }
+}

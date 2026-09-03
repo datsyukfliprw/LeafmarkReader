@@ -22,6 +22,13 @@ API: `http://localhost:8787`
 
 Default `.env.example` profiles are Gavin / 1357 and Savannah / 2468; Parent Mode is 2468. Change all PINs and `COOKIE_SECRET` before a real family deployment.
 
+
+## Deploy on Render
+
+This repository includes a root `render.yaml` Blueprint for a single paid Render web service with a 1 GB persistent disk for SQLite. In Render, create a new Blueprint from this repository, then provide secure values for `PARENT_PIN` and `CHILDREN` when prompted. `COOKIE_SECRET` is generated automatically and the Render start command passes `RENDER_EXTERNAL_URL` through as `APP_ORIGIN` automatically.
+
+The server runs SQLite migrations at process startup, because Render persistent disks are available only at runtime, not during build or pre-deploy commands. The default Render deployment uses deterministic model fallbacks unless you separately configure a remotely reachable OpenAI-compatible endpoint with `LOCAL_AI_BASE_URL` and `LOCAL_AI_API_KEY`.
+
 ## Production
 
 ```text

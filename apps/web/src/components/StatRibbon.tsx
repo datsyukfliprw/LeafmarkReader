@@ -1,0 +1,2 @@
+import { formatMinutes } from '@leafmark/shared';
+export function StatRibbon({stats}:{stats:any}){return <section className="stat-ribbon" aria-label="Your reading journey"><div><strong>{stats.booksFinished??0}</strong><span>Books finished</span></div><div><strong>{formatMinutes(stats.readingSeconds??0)}</strong><span>Time reading</span></div><div><strong>{stats.journalEntries??0}</strong><span>Journal entries</span></div><div className="words-stat"><strong>{Number(stats.wordsWritten??0).toLocaleString()}</strong><span>Words written</span></div></section>}
