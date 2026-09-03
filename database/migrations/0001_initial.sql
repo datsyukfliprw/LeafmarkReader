@@ -1,17 +1,129 @@
-PRAGMA foreign_keys = ON;
-CREATE TABLE IF NOT EXISTS children (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS books (id INTEGER PRIMARY KEY AUTOINCREMENT, isbn TEXT NOT NULL UNIQUE, title TEXT NOT NULL, author TEXT NOT NULL DEFAULT 'Unknown author', edition TEXT, publisher TEXT, publication_date TEXT, page_count INTEGER, description TEXT, cover_url TEXT, source TEXT NOT NULL, created_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS child_books (id INTEGER PRIMARY KEY AUTOINCREMENT, child_id INTEGER NOT NULL REFERENCES children(id) ON DELETE CASCADE, book_id INTEGER NOT NULL REFERENCES books(id) ON DELETE RESTRICT, status TEXT NOT NULL DEFAULT 'current' CHECK(status IN ('current','completed')), current_page INTEGER, current_chapter TEXT, started_at TEXT NOT NULL, completed_at TEXT, UNIQUE(child_id,book_id));
+CREATE TABLE IF NOT EXISTS children (
+  id SERIAL PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS books (
+  id SERIAL PRIMARY KEY,
+  isbn TEXT NOT NULL UNIQUE,
+  title TEXT NOT NULL,
+  author TEXT NOT NULL DEFAULT 'Unknown author',
+  edition TEXT,
+  publisher TEXT,
+  publication_date TEXT,
+  page_count INTEGER,
+  description TEXT,
+  cover_url TEXT,
+  source TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS child_books (
+  id SERIAL PRIMARY KEY,
+  child_id INTEGER NOT NULL REFERENCES children(id) ON DELETE CASCADE,
+  book_id INTEGER NOT NULL REFERENCES books(id) ON DELETE RESTRICT,
+  status TEXT NOT NULL DEFAULT 'current' CHECK(status IN ('current','completed')),
+  current_page INTEGER,
+  current_chapter TEXT,
+  started_at TEXT NOT NULL,
+  completed_at TEXT,
+  UNIQUE(child_id,book_id)
+);
 CREATE INDEX IF NOT EXISTS child_books_child_idx ON child_books(child_id);
-CREATE TABLE IF NOT EXISTS reading_sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, client_id TEXT NOT NULL, child_id INTEGER NOT NULL REFERENCES children(id) ON DELETE CASCADE, child_book_id INTEGER NOT NULL REFERENCES child_books(id) ON DELETE CASCADE, started_at TEXT NOT NULL, ended_at TEXT, elapsed_seconds INTEGER NOT NULL DEFAULT 0, start_page INTEGER, end_page INTEGER, start_chapter TEXT, end_chapter TEXT, status TEXT NOT NULL DEFAULT 'reading' CHECK(status IN ('reading','writing','complete')), UNIQUE(child_id,client_id));
-CREATE INDEX IF NOT EXISTS reading_sessions_child_idx ON reading_sessions(child_id); CREATE INDEX IF NOT EXISTS reading_sessions_book_idx ON reading_sessions(child_book_id);
-CREATE TABLE IF NOT EXISTS journal_entries (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER NOT NULL UNIQUE REFERENCES reading_sessions(id) ON DELETE CASCADE, child_id INTEGER NOT NULL REFERENCES children(id) ON DELETE CASCADE, child_book_id INTEGER NOT NULL REFERENCES child_books(id) ON DELETE CASCADE, initial_recall TEXT NOT NULL, original_writing TEXT NOT NULL, revised_writing TEXT, revision_prompt TEXT, writing_skill TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+
+CREATE TABLE IF NOT EXISTS reading_sessions (
+  id SERIAL PRIMARY KEY,
+  client_id TEXT NOT NULL,
+  child_id INTEGER NOT NULL REFERENCES children(id) ON DELETE CASCADE,
+  child_book_id INTEGER NOT NULL REFERENCES child_books(id) ON DELETE CASCADE,
+  started_at TEXT NOT NULL,
+  ended_at TEXT,
+  elapsed_seconds INTEGER NOT NULL DEFAULT 0,
+  start_page INTEGER,
+  end_page INTEGER,
+  start_chapter TEXT,
+  end_chapter TEXT,
+  status TEXT NOT NULL DEFAULT 'reading' CHECK(status IN ('reading','writing','complete')),
+  UNIQUE(child_id,client_id)
+);
+CREATE INDEX IF NOT EXISTS reading_sessions_child_idx ON reading_sessions(child_id);
+CREATE INDEX IF NOT EXISTS reading_sessions_book_idx ON reading_sessions(child_book_id);
+
+CREATE TABLE IF NOT EXISTS journal_entries (
+  id SERIAL PRIMARY KEY,
+  session_id INTEGER NOT NULL UNIQUE REFERENCES reading_sessions(id) ON DELETE CASCADE,
+  child_id INTEGER NOT NULL REFERENCES children(id) ON DELETE CASCADE,
+  child_book_id INTEGER NOT NULL REFERENCES child_books(id) ON DELETE CASCADE,
+  initial_recall TEXT NOT NULL,
+  original_writing TEXT NOT NULL,
+  revised_writing TEXT,
+  revision_prompt TEXT,
+  writing_skill TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS journal_entries_child_idx ON journal_entries(child_id);
-CREATE TABLE IF NOT EXISTS comprehension_attempts (id INTEGER PRIMARY KEY AUTOINCREMENT, journal_id INTEGER NOT NULL UNIQUE REFERENCES journal_entries(id) ON DELETE CASCADE, skill TEXT NOT NULL, difficulty INTEGER NOT NULL, question TEXT NOT NULL, response TEXT, requires_text_evidence INTEGER NOT NULL DEFAULT 0, level TEXT, evidence_present INTEGER, observations_json TEXT, created_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS journal_revisions (id INTEGER PRIMARY KEY AUTOINCREMENT, journal_id INTEGER NOT NULL REFERENCES journal_entries(id) ON DELETE CASCADE, original_text TEXT NOT NULL, revised_text TEXT NOT NULL, prompt TEXT NOT NULL, skill TEXT NOT NULL, created_at TEXT NOT NULL);
+
+CREATE TABLE IF NOT EXISTS comprehension_attempts (
+  id SERIAL PRIMARY KEY,
+  journal_id INTEGER NOT NULL UNIQUE REFERENCES journal_entries(id) ON DELETE CASCADE,
+  skill TEXT NOT NULL,
+  difficulty INTEGER NOT NULL,
+  question TEXT NOT NULL,
+  response TEXT,
+  requires_text_evidence INTEGER NOT NULL DEFAULT 0,
+  level TEXT,
+  evidence_present INTEGER,
+  observations_json TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS journal_revisions (
+  id SERIAL PRIMARY KEY,
+  journal_id INTEGER NOT NULL REFERENCES journal_entries(id) ON DELETE CASCADE,
+  original_text TEXT NOT NULL,
+  revised_text TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  skill TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS revisions_journal_idx ON journal_revisions(journal_id);
-CREATE TABLE IF NOT EXISTS skill_observations (id INTEGER PRIMARY KEY AUTOINCREMENT, child_id INTEGER NOT NULL REFERENCES children(id) ON DELETE CASCADE, domain TEXT NOT NULL CHECK(domain IN ('reading','writing')), skill TEXT NOT NULL, level TEXT NOT NULL CHECK(level IN ('developing','practicing','consistent','independent')), source_id INTEGER NOT NULL, observed_at TEXT NOT NULL);
+
+CREATE TABLE IF NOT EXISTS skill_observations (
+  id SERIAL PRIMARY KEY,
+  child_id INTEGER NOT NULL REFERENCES children(id) ON DELETE CASCADE,
+  domain TEXT NOT NULL CHECK(domain IN ('reading','writing')),
+  skill TEXT NOT NULL,
+  level TEXT NOT NULL CHECK(level IN ('developing','practicing','consistent','independent')),
+  source_id INTEGER NOT NULL,
+  observed_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS skill_obs_child_skill_idx ON skill_observations(child_id,skill);
-CREATE TABLE IF NOT EXISTS ai_interactions (id INTEGER PRIMARY KEY AUTOINCREMENT, child_id INTEGER, kind TEXT NOT NULL, model TEXT NOT NULL, ok INTEGER NOT NULL, latency_ms INTEGER, error_code TEXT, created_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS metadata_cache (isbn TEXT PRIMARY KEY, payload_json TEXT NOT NULL, source TEXT NOT NULL, cached_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS sync_mutations (id INTEGER PRIMARY KEY AUTOINCREMENT, child_id INTEGER NOT NULL, mutation_id TEXT NOT NULL, kind TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(child_id,mutation_id));
+
+CREATE TABLE IF NOT EXISTS ai_interactions (
+  id SERIAL PRIMARY KEY,
+  child_id INTEGER,
+  kind TEXT NOT NULL,
+  model TEXT NOT NULL,
+  ok INTEGER NOT NULL,
+  latency_ms INTEGER,
+  error_code TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS metadata_cache (
+  isbn TEXT PRIMARY KEY,
+  payload_json TEXT NOT NULL,
+  source TEXT NOT NULL,
+  cached_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sync_mutations (
+  id SERIAL PRIMARY KEY,
+  child_id INTEGER NOT NULL,
+  mutation_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(child_id,mutation_id)
+);

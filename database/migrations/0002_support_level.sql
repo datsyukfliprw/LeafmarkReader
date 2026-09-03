@@ -1,1 +1,1 @@
-ALTER TABLE journal_entries ADD COLUMN support_level TEXT NOT NULL DEFAULT 'independent_recall';
+ALTER TABLE journal_entries ADD COLUMN IF NOT EXISTS support_level TEXT NOT NULL DEFAULT 'independent_recall';

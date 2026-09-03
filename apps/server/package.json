@@ -16,14 +16,13 @@
     "@leafmark/pedagogy": "1.0.0",
     "@leafmark/schemas": "1.0.0",
     "@leafmark/shared": "1.0.0",
-    "better-sqlite3": "^11.8.0",
     "dotenv": "^16.4.0",
-    "drizzle-orm": "^0.44.0",
     "fastify": "^5.2.0",
-    "zod": "^3.24.0"
+    "zod": "^3.24.0",
+    "pg": "^8.13.1"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.12",
-    "tsup": "^8.3.0"
+    "tsup": "^8.3.0",
+    "@types/pg": "^8.11.10"
   }
 }

@@ -1,16 +1,78 @@
-import Database from 'better-sqlite3';
-import { drizzle } from 'drizzle-orm/better-sqlite3';
-import fs from 'node:fs'; import path from 'node:path'; import * as schema from './schema.js';
-export function makeDb(databasePath:string){
-  const absolute=path.resolve(databasePath); fs.mkdirSync(path.dirname(absolute),{recursive:true});
-  const sqlite=new Database(absolute); sqlite.pragma('journal_mode = WAL'); sqlite.pragma('foreign_keys = ON'); sqlite.pragma('busy_timeout = 5000');
-  return {sqlite,db:drizzle(sqlite,{schema})};
+import { Pool, type PoolClient, type QueryResultRow } from 'pg';
+import fs from 'node:fs';
+import path from 'node:path';
+
+function postgresSql(sql: string) {
+  let index = 0;
+  return sql.replace(/\?/g, () => `$${++index}`);
 }
-export function runMigration(sqlite:Database.Database){
-  const candidates=[path.resolve(process.cwd(),'database/migrations'),path.resolve(process.cwd(),'../../database/migrations')];
-  const dir=candidates.find(p=>fs.existsSync(p)&&fs.statSync(p).isDirectory()); if(!dir) throw new Error('Migration directory not found');
-  sqlite.exec('CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)');
-  const applied=new Set((sqlite.prepare('SELECT name FROM schema_migrations').all() as {name:string}[]).map(r=>r.name));
-  const files=fs.readdirSync(dir).filter(name=>name.endsWith('.sql')).sort();
-  for(const name of files){if(applied.has(name))continue;const sql=fs.readFileSync(path.join(dir,name),'utf8');const tx=sqlite.transaction(()=>{sqlite.exec(sql);sqlite.prepare('INSERT INTO schema_migrations(name,applied_at) VALUES(?,?)').run(name,new Date().toISOString())});tx();}
+
+type Queryable = Pool | PoolClient;
+
+export class SqlDatabase {
+  constructor(private readonly queryable: Queryable, private readonly pool?: Pool) {}
+
+  async one<T extends QueryResultRow = any>(sql: string, ...params: unknown[]): Promise<T | undefined> {
+    const result = await this.queryable.query<T>(postgresSql(sql), params);
+    return result.rows[0];
+  }
+
+  async all<T extends QueryResultRow = any>(sql: string, ...params: unknown[]): Promise<T[]> {
+    const result = await this.queryable.query<T>(postgresSql(sql), params);
+    return result.rows;
+  }
+
+  async run(sql: string, ...params: unknown[]) {
+    const result = await this.queryable.query(postgresSql(sql), params);
+    return { changes: result.rowCount ?? 0 };
+  }
+
+  async transaction<T>(fn: (tx: SqlDatabase) => Promise<T>): Promise<T> {
+    if (!this.pool) throw new Error('Nested transactions are not supported.');
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const value = await fn(new SqlDatabase(client));
+      await client.query('COMMIT');
+      return value;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async close() {
+    if (this.pool) await this.pool.end();
+  }
+}
+
+export function makeDb(databaseUrl: string) {
+  if (!databaseUrl) throw new Error('DATABASE_URL is required.');
+  const pool = new Pool({ connectionString: databaseUrl, max: 5, idleTimeoutMillis: 30_000 });
+  return new SqlDatabase(pool, pool);
+}
+
+export async function runMigration(db: SqlDatabase) {
+  const candidates = [
+    path.resolve(process.cwd(), 'database/migrations'),
+    path.resolve(process.cwd(), '../../database/migrations'),
+  ];
+  const dir = candidates.find((p) => fs.existsSync(p) && fs.statSync(p).isDirectory());
+  if (!dir) throw new Error('Migration directory not found');
+
+  await db.run('CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)');
+  const appliedRows = await db.all<{ name: string }>('SELECT name FROM schema_migrations');
+  const applied = new Set(appliedRows.map((row) => row.name));
+  const files = fs.readdirSync(dir).filter((name) => name.endsWith('.sql')).sort();
+
+  for (const name of files) {
+    if (applied.has(name)) continue;
+    const sql = fs.readFileSync(path.join(dir, name), 'utf8');
+    await db.transaction(async (tx) => {
+      await tx.run(sql);
+      await tx.run('INSERT INTO schema_migrations(name,applied_at) VALUES(?,?)', name, new Date().toISOString());
+    });
+  }
 }

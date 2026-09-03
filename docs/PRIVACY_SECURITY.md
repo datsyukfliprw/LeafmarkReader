@@ -1,9 +1,9 @@
 # Privacy and security model
 
-Leafmark’s default student-data path is iPad → home server → local SQLite / local model. It contains no third-party analytics and no cloud AI integration. Book ISBN metadata is the intentional exception: only the ISBN needed for metadata lookup is sent to Open Library.
+In the free cloud deployment, Leafmark's permanent student records travel from the iPad to the Render web service and are stored in the configured PostgreSQL provider (for example, Neon). In-progress drafts and queued retry mutations remain in IndexedDB on the iPad. Leafmark contains no third-party analytics. Book ISBN metadata lookup intentionally sends the ISBN to Open Library.
 
-The browser never talks directly to the local LLM. Child and parent sessions use signed, HTTP-only, same-site cookies. Parent Mode has a separate PIN. API routes enforce the authenticated child ID server-side rather than accepting a child ID from the browser for child data access.
+The browser never talks directly to the configured LLM endpoint. Child and parent sessions use signed, HTTP-only, same-site cookies. Parent Mode has a separate PIN. API routes enforce the authenticated child ID server-side rather than accepting a child ID from the browser for child data access.
 
-Student writing is stored as original and revised records. The application never replaces an original journal response when a revision is saved. SQLite foreign keys and WAL mode are enabled, and offline retry mutations use unique idempotency keys.
+Student writing is stored as original and revised records. The application never replaces an original journal response when a revision is saved. PostgreSQL foreign keys protect relational integrity, and offline retry mutations use unique idempotency keys.
 
-For LAN-only HTTP, signed cookies prevent session forgery but network traffic is not encrypted. Use local HTTPS if other users on the network are not trusted or if the service is reachable outside the home LAN.
+Keep `DATABASE_URL`, `COOKIE_SECRET`, child PINs, and parent PIN private. Cloud deployments should remain HTTPS-only; Render's public service URL provides HTTPS by default.

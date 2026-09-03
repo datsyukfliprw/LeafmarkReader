@@ -1,11 +1,6 @@
 node_modules
 .env
-data/
-backups/
 apps/web/dist/
 apps/server/dist/
 playwright-report/
 test-results/
-*.sqlite
-*.sqlite-wal
-*.sqlite-shm

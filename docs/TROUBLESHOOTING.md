@@ -1,8 +1,16 @@
 # Troubleshooting
 
-## The iPad says the home server is unavailable
+## The app says the server is unavailable
 
-The child draft is kept in IndexedDB and queued mutations stay on the iPad. Restore Wi-Fi or the server, then reopen Leafmark. The queue retries in order and mutation IDs prevent duplicate journal actions.
+The child draft is kept in IndexedDB and queued mutations stay on the iPad. Restore connectivity, then reopen Leafmark. The queue retries in order and mutation IDs prevent duplicate journal actions.
+
+## Render fails during startup with DATABASE_URL required
+
+Add `DATABASE_URL` to the Render service Environment settings. Use the PostgreSQL connection string from your database provider. Redeploy after saving it.
+
+## Render reports a database connection error
+
+Confirm the database is active, the connection string is complete, and it includes the provider's required SSL parameters. If using Neon, prefer the pooled connection string for the Render web service.
 
 ## Book lookup cannot identify an ISBN
 
@@ -14,12 +22,12 @@ The model is behind `LearningModel`. Each response is schema-validated. A timeou
 
 ## Parent Mode rejects the PIN
 
-Confirm `PARENT_PIN` in `.env`, restart the service, and sign out/reopen Parent Mode. Parent cookies expire independently from child cookies.
+Confirm `PARENT_PIN` in Render or `.env`, restart/redeploy the service, and sign out/reopen Parent Mode. Parent cookies expire independently from child cookies.
 
 ## PWA does not update immediately
 
-The service worker uses auto-update. Fully close and relaunch the Home Screen app after a server update if iOS keeps an old shell for a short period.
+The service worker uses auto-update. Fully close and relaunch the Home Screen app after a deployment if iOS keeps an old shell briefly.
 
 ## Database recovery
 
-Run `npm run backup` regularly and copy backups to a different physical device. To restore, stop Leafmark and run `RESTORE_FROM=/path/to/backup.sqlite npm run restore`. The restore script checks SQLite integrity first and preserves a pre-restore copy of the existing database.
+Use your PostgreSQL provider's restore/export tooling. Leafmark no longer relies on a local SQLite file, so Render redeploys do not erase permanent student data.

@@ -1,79 +1,304 @@
 import 'dotenv/config';
 import Fastify, { type FastifyRequest } from 'fastify';
-import cors from '@fastify/cors'; import cookie from '@fastify/cookie'; import fastifyStatic from '@fastify/static';
-import path from 'node:path'; import fs from 'node:fs'; import crypto from 'node:crypto';
-import { eq } from 'drizzle-orm'; import { z } from 'zod';
-import { makeDb,runMigration } from './db.js'; import { children } from './schema.js';
+import cors from '@fastify/cors';
+import cookie from '@fastify/cookie';
+import fastifyStatic from '@fastify/static';
+import path from 'node:path';
+import fs from 'node:fs';
+import crypto from 'node:crypto';
+import { z } from 'zod';
+import { makeDb, runMigration, type SqlDatabase } from './db.js';
 import { isValidIsbn, normalizeIsbn, wordCount } from '@leafmark/shared';
-import { evidenceRegistry, selectReadingSkill, selectWritingSkill, deterministicQuestion, deterministicRevision } from '@leafmark/pedagogy';
-import { InstrumentedLearningModel, OpenAICompatibleLearningModel, ResilientLearningModel } from '@leafmark/ai';
+import {
+  evidenceRegistry,
+  selectReadingSkill,
+  selectWritingSkill,
+  deterministicQuestion,
+  deterministicRevision,
+} from '@leafmark/pedagogy';
+import {
+  InstrumentedLearningModel,
+  OpenAICompatibleLearningModel,
+  ResilientLearningModel,
+} from '@leafmark/ai';
 import { ReadingSkillSchema, WritingSkillSchema } from '@leafmark/schemas';
 import { OpenLibraryProvider } from './metadata.js';
 
-const config={host:process.env.HOST??'0.0.0.0',port:Number(process.env.PORT??8787),dbPath:process.env.DATABASE_PATH??'./data/leafmark.sqlite',origin:process.env.APP_ORIGIN??'http://localhost:4173',cookieSecret:process.env.COOKIE_SECRET??'development-only-change-me-development-only',parentPin:process.env.PARENT_PIN??'2468',children:process.env.CHILDREN??'Gavin:1357,Savannah:2468',aiBase:process.env.LOCAL_AI_BASE_URL??'http://127.0.0.1:1234/v1',aiModel:process.env.LOCAL_AI_MODEL??'Bonsai-27B',aiKey:process.env.LOCAL_AI_API_KEY??'local',aiTimeout:Number(process.env.AI_TIMEOUT_MS??5000),metadataTimeout:Number(process.env.BOOK_METADATA_TIMEOUT_MS??4500)};
-if(process.env.NODE_ENV==='production'){if(!process.env.COOKIE_SECRET||process.env.COOKIE_SECRET.length<32||process.env.COOKIE_SECRET.startsWith('replace-'))throw new Error('Production requires a unique COOKIE_SECRET with at least 32 characters.');if(!process.env.PARENT_PIN||process.env.PARENT_PIN.length<4||process.env.PARENT_PIN==='2468')throw new Error('Production requires a non-default PARENT_PIN.');if(!process.env.CHILDREN||process.env.CHILDREN==='Gavin:1357,Savannah:2468')throw new Error('Production requires explicit non-default CHILDREN profile/PIN configuration.');if(!process.env.APP_ORIGIN)throw new Error('Production requires APP_ORIGIN set to the URL used by the family.');}
-const {sqlite,db}=makeDb(config.dbPath); runMigration(sqlite);
-const now=()=>new Date().toISOString();
-const childConfig=new Map(config.children.split(',').map(x=>x.trim()).filter(Boolean).map(entry=>{const [name,...pin]=entry.split(':');return [name!,pin.join(':')||''] as const;}));
-for(const name of childConfig.keys()) db.insert(children).values({name,createdAt:now()}).onConflictDoNothing().run();
-const metadataProvider=new OpenLibraryProvider(config.metadataTimeout);
-const primaryModel=new OpenAICompatibleLearningModel({baseUrl:config.aiBase,model:config.aiModel,apiKey:config.aiKey,timeoutMs:config.aiTimeout});
-const instrumentedModel=new InstrumentedLearningModel(primaryModel,event=>{sqlite.prepare('INSERT INTO ai_interactions(kind,model,ok,latency_ms,error_code,created_at) VALUES(?,?,?,?,?,?)').run(event.kind,config.aiModel,event.ok?1:0,event.latencyMs,event.error instanceof Error?event.error.message.slice(0,80):null,now())});
-const model=new ResilientLearningModel(instrumentedModel);
+const config = {
+  host: process.env.HOST ?? '0.0.0.0',
+  port: Number(process.env.PORT ?? 8787),
+  databaseUrl: process.env.DATABASE_URL ?? '',
+  origin: process.env.APP_ORIGIN ?? process.env.RENDER_EXTERNAL_URL ?? 'http://localhost:4173',
+  cookieSecret: process.env.COOKIE_SECRET ?? 'development-only-change-me-development-only',
+  parentPin: process.env.PARENT_PIN ?? '2468',
+  children: process.env.CHILDREN ?? 'Gavin:1357,Savannah:2468',
+  aiBase: process.env.LOCAL_AI_BASE_URL ?? 'http://127.0.0.1:1234/v1',
+  aiModel: process.env.LOCAL_AI_MODEL ?? 'Bonsai-27B',
+  aiKey: process.env.LOCAL_AI_API_KEY ?? 'local',
+  aiTimeout: Number(process.env.AI_TIMEOUT_MS ?? 5000),
+  metadataTimeout: Number(process.env.BOOK_METADATA_TIMEOUT_MS ?? 4500),
+};
 
-const app=Fastify({logger:{level:process.env.NODE_ENV==='production'?'info':'warn'}});
-await app.register(cookie,{secret:config.cookieSecret,hook:'onRequest'});
-await app.register(cors,{origin:[config.origin,'http://127.0.0.1:4173','http://localhost:4173'],credentials:true});
-
-function constantTimePin(a:string,b:string){const ah=crypto.createHash('sha256').update(a).digest();const bh=crypto.createHash('sha256').update(b).digest();return crypto.timingSafeEqual(ah,bh)}
-type Session={role:'child'|'parent';childId?:number};
-function session(req:FastifyRequest):Session|null{const raw=req.cookies.leafmark_session;if(!raw)return null;const unsigned=req.unsignCookie(raw);if(!unsigned.valid)return null;const [role,id]=unsigned.value.split(':');if(role==='parent')return{role:'parent'};if(role==='child'&&Number(id))return{role:'child',childId:Number(id)};return null;}
-function childSession(req:FastifyRequest){const s=session(req);if(!s||s.role!=='child'||!s.childId)throw Object.assign(new Error('child_auth_required'),{statusCode:401});return s;}
-function parentSession(req:FastifyRequest){const s=session(req);if(!s||s.role!=='parent')throw Object.assign(new Error('parent_auth_required'),{statusCode:401});return s;}
-function safeError(reply:any,error:any,child=true){const status=Number(error?.statusCode)||400;reply.code(status).send({error:child?'Something went sideways. Your work is safe. Please try again.':'Request could not be completed.',code:process.env.NODE_ENV==='production'?undefined:String(error?.message??'unknown')});}
-function ownChildBook(childId:number,id:number){return sqlite.prepare('SELECT cb.*,b.title,b.author,b.cover_url,b.page_count,b.isbn,b.description FROM child_books cb JOIN books b ON b.id=cb.book_id WHERE cb.id=? AND cb.child_id=?').get(id,childId) as any;}
-function recordMutation(childId:number,mutationId:string|undefined,kind:string){if(!mutationId)return;sqlite.prepare('INSERT OR IGNORE INTO sync_mutations(child_id,mutation_id,kind,created_at) VALUES(?,?,?,?)').run(childId,mutationId,kind,now())}
-function safeQuestionOutput(question:string){return question.trim().endsWith('?')&&!/(the answer is|correct answer|you should say|remember that|obviously|clearly,? the)/i.test(question)}
-function safeRevisionOutput(challenge:string){return !/(you could say|try writing|write this|replace it with|here(?:'s| is) a sentence|example answer)/i.test(challenge)}
-function compactBookMemory(childBookId:number){const position=sqlite.prepare('SELECT current_page,current_chapter,status FROM child_books WHERE id=?').get(childBookId) as any;const recent=sqlite.prepare(`SELECT j.initial_recall,ca.response,ca.skill FROM journal_entries j LEFT JOIN comprehension_attempts ca ON ca.journal_id=j.id WHERE j.child_book_id=? ORDER BY j.created_at DESC LIMIT 3`).all(childBookId) as any[];return{position,recentStudentMemory:recent.map(r=>({recall:String(r.initial_recall||'').slice(0,500),response:String(r.response||'').slice(0,350),skill:r.skill||null}))}}
-function childDashboard(childId:number){
- const child=sqlite.prepare('SELECT id,name FROM children WHERE id=?').get(childId) as any;
- const current=sqlite.prepare(`SELECT cb.*,b.title,b.author,b.cover_url,b.page_count,b.isbn,(SELECT MAX(end_page) FROM reading_sessions rs WHERE rs.child_book_id=cb.id AND rs.status='complete') last_end,(SELECT start_page FROM reading_sessions rs WHERE rs.child_book_id=cb.id ORDER BY rs.started_at DESC LIMIT 1) last_start FROM child_books cb JOIN books b ON b.id=cb.book_id WHERE cb.child_id=? AND cb.status='current' ORDER BY cb.started_at DESC LIMIT 1`).get(childId) as any;
- const stats=sqlite.prepare(`SELECT (SELECT COUNT(*) FROM child_books WHERE child_id=? AND status='completed') booksFinished,(SELECT COALESCE(SUM(elapsed_seconds),0) FROM reading_sessions WHERE child_id=? AND status='complete') readingSeconds,(SELECT COUNT(*) FROM journal_entries WHERE child_id=?) journalEntries`).get(childId,childId,childId) as any;
- const writings=sqlite.prepare('SELECT original_writing,revised_writing FROM journal_entries WHERE child_id=?').all(childId) as any[]; stats.wordsWritten=writings.reduce((n,j)=>n+wordCount(j.revised_writing||j.original_writing),0);
- return {child,current:current?{...current,pickupPage:current.current_page??(current.last_end?current.last_end+1:1)}:null,stats};
+if (process.env.NODE_ENV === 'production') {
+  if (!config.databaseUrl) throw new Error('Production requires DATABASE_URL.');
+  if (!process.env.COOKIE_SECRET || process.env.COOKIE_SECRET.length < 32 || process.env.COOKIE_SECRET.startsWith('replace-')) {
+    throw new Error('Production requires a unique COOKIE_SECRET with at least 32 characters.');
+  }
+  if (!process.env.PARENT_PIN || process.env.PARENT_PIN.length < 4 || process.env.PARENT_PIN === '2468') {
+    throw new Error('Production requires a non-default PARENT_PIN.');
+  }
+  if (!process.env.CHILDREN || process.env.CHILDREN === 'Gavin:1357,Savannah:2468') {
+    throw new Error('Production requires explicit non-default CHILDREN profile/PIN configuration.');
+  }
+  if (!config.origin.startsWith('https://')) throw new Error('Production requires an HTTPS APP_ORIGIN or RENDER_EXTERNAL_URL.');
 }
 
-app.get('/health',async()=>({ok:true,service:'leafmark',model:config.aiModel}));
-app.get('/api/children',async()=>({children:(await db.select({id:children.id,name:children.name}).from(children))}));
-app.post('/api/auth/child',async(req,reply)=>{try{const body=z.object({childId:z.number().int().positive(),pin:z.string().max(16)}).parse(req.body);const child=(await db.select().from(children).where(eq(children.id,body.childId)))[0];if(!child)throw Object.assign(new Error('not_found'),{statusCode:404});const expected=childConfig.get(child.name)??'';if(expected&&!constantTimePin(body.pin,expected))throw Object.assign(new Error('bad_pin'),{statusCode:401});reply.setCookie('leafmark_session',`child:${child.id}`,{path:'/',httpOnly:true,sameSite:'strict',signed:true,secure:process.env.NODE_ENV==='production'&&config.origin.startsWith('https:'),maxAge:60*60*24*30});return{ok:true,child:{id:child.id,name:child.name}}}catch(e){return safeError(reply,e)}});
-app.post('/api/auth/parent',async(req,reply)=>{try{const body=z.object({pin:z.string().min(4).max(32)}).parse(req.body);if(!constantTimePin(body.pin,config.parentPin))throw Object.assign(new Error('bad_pin'),{statusCode:401});reply.setCookie('leafmark_session','parent',{path:'/',httpOnly:true,sameSite:'strict',signed:true,secure:process.env.NODE_ENV==='production'&&config.origin.startsWith('https:'),maxAge:60*60*8});return{ok:true}}catch(e){return safeError(reply,e,false)}});
-app.post('/api/auth/logout',async(_req,reply)=>{reply.clearCookie('leafmark_session',{path:'/'});return{ok:true}});
-app.get('/api/auth/me',async(req)=>({session:session(req)}));
+const database = makeDb(config.databaseUrl);
+await runMigration(database);
+const now = () => new Date().toISOString();
+const childConfig = new Map(
+  config.children
+    .split(',')
+    .map((x) => x.trim())
+    .filter(Boolean)
+    .map((entry) => {
+      const [name, ...pin] = entry.split(':');
+      return [name!, pin.join(':') || ''] as const;
+    }),
+);
 
-app.get('/api/dashboard',async(req,reply)=>{try{const s=childSession(req);return childDashboard(s.childId!)}catch(e){return safeError(reply,e)}});
-app.get('/api/books',async(req,reply)=>{try{const s=childSession(req);const rows=sqlite.prepare(`SELECT cb.*,b.title,b.author,b.cover_url,b.page_count,b.isbn,b.description,b.publisher,b.publication_date FROM child_books cb JOIN books b ON b.id=cb.book_id WHERE cb.child_id=? ORDER BY CASE cb.status WHEN 'current' THEN 0 ELSE 1 END, COALESCE(cb.completed_at,cb.started_at) DESC`).all(s.childId);return{books:rows}}catch(e){return safeError(reply,e)}});
-app.post('/api/books/lookup',async(req,reply)=>{try{childSession(req);const body=z.object({isbn:z.string().max(32)}).parse(req.body);const isbn=normalizeIsbn(body.isbn);if(!isValidIsbn(isbn))throw Object.assign(new Error('invalid_isbn'),{statusCode:422});const cached=sqlite.prepare('SELECT * FROM metadata_cache WHERE isbn=?').get(isbn) as any;if(cached)return{valid:true,metadata:JSON.parse(cached.payload_json),source:cached.source};try{const metadata=await metadataProvider.lookup(isbn);if(metadata){sqlite.prepare('INSERT OR REPLACE INTO metadata_cache(isbn,payload_json,source,cached_at) VALUES(?,?,?,?)').run(isbn,JSON.stringify(metadata),metadata.source,now());return{valid:true,metadata,source:metadata.source}}return{valid:true,metadata:null,message:'We could not confidently identify this edition. Please enter the book details.'}}catch(error){app.log.warn({err:error,isbn},'Book metadata provider unavailable');return{valid:true,metadata:null,message:'Book lookup is unavailable right now. Your ISBN is valid; please enter the book details.'}}}catch(e){return safeError(reply,e)}});
-app.post('/api/books',async(req,reply)=>{try{const s=childSession(req);const body=z.object({isbn:z.string(),title:z.string().trim().min(1).max(300),author:z.string().trim().min(1).max(300).default('Unknown author'),edition:z.string().max(200).optional(),publisher:z.string().max(200).optional(),publicationDate:z.string().max(80).optional(),pageCount:z.number().int().positive().max(10000).optional(),description:z.string().max(5000).optional(),coverUrl:z.string().url().optional(),source:z.string().max(100).default('Manual')}).parse(req.body);const isbn=normalizeIsbn(body.isbn);if(!isValidIsbn(isbn))throw Object.assign(new Error('invalid_isbn'),{statusCode:422});sqlite.prepare(`INSERT INTO books(isbn,title,author,edition,publisher,publication_date,page_count,description,cover_url,source,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(isbn) DO UPDATE SET title=excluded.title,author=excluded.author,edition=COALESCE(excluded.edition,books.edition),publisher=COALESCE(excluded.publisher,books.publisher),publication_date=COALESCE(excluded.publication_date,books.publication_date),page_count=COALESCE(excluded.page_count,books.page_count),description=COALESCE(excluded.description,books.description),cover_url=COALESCE(excluded.cover_url,books.cover_url)`).run(isbn,body.title,body.author,body.edition??null,body.publisher??null,body.publicationDate??null,body.pageCount??null,body.description??null,body.coverUrl??null,body.source,now());const book=sqlite.prepare('SELECT id FROM books WHERE isbn=?').get(isbn) as any;sqlite.prepare(`INSERT INTO child_books(child_id,book_id,status,started_at) VALUES(?,?, 'current',?) ON CONFLICT(child_id,book_id) DO UPDATE SET status='current',completed_at=NULL`).run(s.childId,book.id,now());const childBook=sqlite.prepare('SELECT id FROM child_books WHERE child_id=? AND book_id=?').get(s.childId,book.id) as any;return{ok:true,childBookId:childBook.id}}catch(e){return safeError(reply,e)}});
-app.get('/api/books/:id',async(req,reply)=>{try{const s=childSession(req);const book=ownChildBook(s.childId!,Number((req.params as any).id));if(!book)throw Object.assign(new Error('not_found'),{statusCode:404});const journals=sqlite.prepare(`SELECT j.id,j.created_at,j.original_writing,j.revised_writing,j.revision_prompt,j.writing_skill,j.support_level,ca.skill reading_skill,ca.question,ca.response,ca.level reading_level,rs.start_page,rs.end_page,rs.start_chapter,rs.end_chapter,rs.elapsed_seconds FROM journal_entries j JOIN reading_sessions rs ON rs.id=j.session_id LEFT JOIN comprehension_attempts ca ON ca.journal_id=j.id WHERE j.child_book_id=? AND j.child_id=? ORDER BY j.created_at DESC`).all(book.id,s.childId);return{book,journals}}catch(e){return safeError(reply,e)}});
-app.post('/api/books/:id/complete',async(req,reply)=>{try{const s=childSession(req);const id=Number((req.params as any).id);if(!ownChildBook(s.childId!,id))throw Object.assign(new Error('not_found'),{statusCode:404});sqlite.prepare("UPDATE child_books SET status='completed',completed_at=? WHERE id=? AND child_id=?").run(now(),id,s.childId);return{ok:true}}catch(e){return safeError(reply,e)}});
+for (const name of childConfig.keys()) {
+  await database.run(
+    'INSERT INTO children(name,created_at) VALUES(?,?) ON CONFLICT(name) DO NOTHING',
+    name,
+    now(),
+  );
+}
 
-app.post('/api/books/:id/sessions',async(req,reply)=>{try{const s=childSession(req);const id=Number((req.params as any).id);const book=ownChildBook(s.childId!,id);if(!book)throw Object.assign(new Error('not_found'),{statusCode:404});const body=z.object({clientId:z.string().uuid(),startPage:z.number().int().positive().optional(),startChapter:z.string().trim().min(1).max(200).optional()}).refine(x=>Boolean(x.startPage)||Boolean(x.startChapter),{message:'Choose a page or chapter.'}).parse(req.body);const existing=sqlite.prepare('SELECT * FROM reading_sessions WHERE child_id=? AND client_id=?').get(s.childId,body.clientId) as any;if(existing)return{session:existing};sqlite.prepare(`INSERT INTO reading_sessions(client_id,child_id,child_book_id,started_at,start_page,start_chapter,status) VALUES(?,?,?,?,?,?, 'reading')`).run(body.clientId,s.childId,id,now(),body.startPage??null,body.startChapter??null);const created=sqlite.prepare('SELECT * FROM reading_sessions WHERE child_id=? AND client_id=?').get(s.childId,body.clientId);return{session:created}}catch(e){return safeError(reply,e)}});
-app.get('/api/sessions/active',async(req,reply)=>{try{const s=childSession(req);const active=sqlite.prepare(`SELECT rs.*,b.title,b.author,b.cover_url FROM reading_sessions rs JOIN child_books cb ON cb.id=rs.child_book_id JOIN books b ON b.id=cb.book_id WHERE rs.child_id=? AND rs.status!='complete' ORDER BY rs.started_at DESC LIMIT 1`).get(s.childId);return{session:active??null}}catch(e){return safeError(reply,e)}});
-app.post('/api/sessions/:id/finish-reading',async(req,reply)=>{try{const s=childSession(req);const id=Number((req.params as any).id);const body=z.object({endPage:z.number().int().positive().optional(),endChapter:z.string().trim().min(1).max(200).optional(),elapsedSeconds:z.number().int().min(900).max(86400),mutationId:z.string().uuid().optional()}).refine(x=>Boolean(x.endPage)||Boolean(x.endChapter),{message:'Choose the ending page or chapter.'}).parse(req.body);const row=sqlite.prepare('SELECT * FROM reading_sessions WHERE id=? AND child_id=?').get(id,s.childId) as any;if(!row)throw Object.assign(new Error('not_found'),{statusCode:404});if(row.status!=='reading')return{ok:true,session:row,duplicate:true};if(body.endPage&&row.start_page&&body.endPage<row.start_page)throw Object.assign(new Error('end_before_start'),{statusCode:422});sqlite.prepare("UPDATE reading_sessions SET ended_at=?,elapsed_seconds=?,end_page=?,end_chapter=?,status='writing' WHERE id=? AND child_id=?").run(now(),body.elapsedSeconds,body.endPage??null,body.endChapter??null,id,s.childId);recordMutation(s.childId!,body.mutationId,'finish-reading');return{ok:true,session:sqlite.prepare('SELECT * FROM reading_sessions WHERE id=?').get(id)}}catch(e){return safeError(reply,e)}});
-app.post('/api/sessions/:id/recall',async(req,reply)=>{try{const s=childSession(req);const id=Number((req.params as any).id);const body=z.object({recall:z.string().trim().min(3).max(8000),mutationId:z.string().uuid().optional()}).parse(req.body);const rs=sqlite.prepare("SELECT * FROM reading_sessions WHERE id=? AND child_id=? AND status IN ('writing','complete')").get(id,s.childId) as any;if(!rs)throw Object.assign(new Error('finish_reading_first'),{statusCode:409}); const created=now();sqlite.prepare(`INSERT INTO journal_entries(session_id,child_id,child_book_id,initial_recall,original_writing,created_at,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(session_id) DO NOTHING`).run(id,s.childId,rs.child_book_id,body.recall,body.recall,created,created);const j=sqlite.prepare('SELECT * FROM journal_entries WHERE session_id=?').get(id) as any;
- const existingQuestion=sqlite.prepare('SELECT skill,difficulty,question,requires_text_evidence requiresTextEvidence FROM comprehension_attempts WHERE journal_id=?').get(j.id) as any;if(existingQuestion)return{journal:j,question:{...existingQuestion,requiresTextEvidence:!!existingQuestion.requiresTextEvidence},duplicate:true};
- const obs=sqlite.prepare("SELECT skill,level,observed_at observedAt FROM skill_observations WHERE child_id=? AND domain='reading' ORDER BY observed_at").all(s.childId) as any[];const count=(sqlite.prepare('SELECT COUNT(*) c FROM journal_entries WHERE child_id=?').get(s.childId) as any).c;const choice=selectReadingSkill(obs,count-1);const memory=compactBookMemory(rs.child_book_id);const priorContext=memory.recentStudentMemory.slice(1,3).map((m:any)=>`Previously practiced skill: ${m.skill||'unclassified'}`);let q=await model.generateQuestion({skill:choice.skill,difficulty:choice.difficulty,recall:body.recall,priorContext});if(q.skill!==choice.skill||!safeQuestionOutput(q.question))q={...deterministicQuestion(choice.skill,choice.difficulty),difficulty:choice.difficulty} as any;sqlite.prepare(`INSERT INTO comprehension_attempts(journal_id,skill,difficulty,question,requires_text_evidence,created_at) VALUES(?,?,?,?,?,?) ON CONFLICT(journal_id) DO NOTHING`).run(j.id,choice.skill,choice.difficulty,q.question,q.requiresTextEvidence?1:0,created);recordMutation(s.childId!,body.mutationId,'recall');return{journal:j,question:{skill:choice.skill,difficulty:choice.difficulty,question:q.question,requiresTextEvidence:q.requiresTextEvidence},evidenceId:choice.evidence.id}}catch(e){return safeError(reply,e)}});
-app.post('/api/sessions/:id/comprehension',async(req,reply)=>{try{const s=childSession(req);const id=Number((req.params as any).id);const body=z.object({response:z.string().trim().min(1).max(6000),mutationId:z.string().uuid().optional()}).parse(req.body);const j=sqlite.prepare('SELECT j.*,rs.child_id FROM journal_entries j JOIN reading_sessions rs ON rs.id=j.session_id WHERE j.session_id=? AND rs.child_id=?').get(id,s.childId) as any;if(!j)throw Object.assign(new Error('recall_required'),{statusCode:409});const ca=sqlite.prepare('SELECT * FROM comprehension_attempts WHERE journal_id=?').get(j.id) as any;if(!ca)throw Object.assign(new Error('question_required'),{statusCode:409});if(ca.response&&j.revision_prompt&&j.writing_skill)return{revisionPrompt:j.revision_prompt,writingSkill:j.writing_skill,duplicate:true};const skill=ReadingSkillSchema.parse(ca.skill);const evaluation=await model.evaluateResponse({skill,question:ca.question,response:body.response,recall:j.initial_recall});sqlite.prepare('UPDATE comprehension_attempts SET response=?,level=?,evidence_present=?,observations_json=? WHERE id=?').run(body.response,evaluation.demonstrated,evaluation.evidencePresent?1:0,JSON.stringify(evaluation.observations),ca.id);sqlite.prepare(`INSERT INTO skill_observations(child_id,domain,skill,level,source_id,observed_at) VALUES(?,?,?,?,?,?)`).run(s.childId,'reading',skill,evaluation.demonstrated,ca.id,now());const writing=selectWritingSkill(j.original_writing);let revision=await model.generateRevisionPrompt({skill:writing.skill,original:j.original_writing,comprehensionResponse:body.response});if(revision.skill!==writing.skill||!safeRevisionOutput(revision.challenge))revision=deterministicRevision(writing.skill) as any;sqlite.prepare('UPDATE journal_entries SET revision_prompt=?,writing_skill=?,support_level=?,updated_at=? WHERE id=?').run(revision.challenge,writing.skill,'one_question_one_revision_prompt',now(),j.id);recordMutation(s.childId!,body.mutationId,'comprehension');return{evaluation,revisionPrompt:revision.challenge,writingSkill:writing.skill}}catch(e){return safeError(reply,e)}});
-app.post('/api/sessions/:id/revision',async(req,reply)=>{try{const s=childSession(req);const id=Number((req.params as any).id);const body=z.object({revised:z.string().trim().min(1).max(8000),mutationId:z.string().uuid().optional()}).parse(req.body);const j=sqlite.prepare('SELECT j.*,rs.end_page,rs.end_chapter,rs.child_book_id,rs.status session_status FROM journal_entries j JOIN reading_sessions rs ON rs.id=j.session_id WHERE j.session_id=? AND rs.child_id=?').get(id,s.childId) as any;if(!j?.revision_prompt||!j?.writing_skill)throw Object.assign(new Error('revision_prompt_required'),{statusCode:409});if(j.revised_writing&&j.session_status==='complete')return{ok:true,journalId:j.id,duplicate:true};const created=now();const tx=sqlite.transaction(()=>{sqlite.prepare('INSERT INTO journal_revisions(journal_id,original_text,revised_text,prompt,skill,created_at) VALUES(?,?,?,?,?,?)').run(j.id,j.original_writing,body.revised,j.revision_prompt,j.writing_skill,created);sqlite.prepare('UPDATE journal_entries SET revised_writing=?,updated_at=? WHERE id=?').run(body.revised,created,j.id);sqlite.prepare("UPDATE reading_sessions SET status='complete' WHERE id=?").run(id);if(j.end_page)sqlite.prepare('UPDATE child_books SET current_page=?,current_chapter=NULL WHERE id=? AND child_id=?').run(Number(j.end_page)+1,j.child_book_id,s.childId);else if(j.end_chapter)sqlite.prepare('UPDATE child_books SET current_chapter=?,current_page=NULL WHERE id=? AND child_id=?').run(j.end_chapter,j.child_book_id,s.childId);const changed=body.revised.trim()!==j.original_writing.trim();const level=changed?'practicing':'developing';sqlite.prepare(`INSERT INTO skill_observations(child_id,domain,skill,level,source_id,observed_at) VALUES(?,?,?,?,?,?)`).run(s.childId,'writing',WritingSkillSchema.parse(j.writing_skill),level,j.id,created);recordMutation(s.childId!,body.mutationId,'revision')});tx();return{ok:true,journalId:j.id,dashboard:childDashboard(s.childId!)}}catch(e){return safeError(reply,e)}});
+const metadataProvider = new OpenLibraryProvider(config.metadataTimeout);
+const primaryModel = new OpenAICompatibleLearningModel({
+  baseUrl: config.aiBase,
+  model: config.aiModel,
+  apiKey: config.aiKey,
+  timeoutMs: config.aiTimeout,
+});
+const instrumentedModel = new InstrumentedLearningModel(primaryModel, (event) => {
+  void database
+    .run(
+      'INSERT INTO ai_interactions(kind,model,ok,latency_ms,error_code,created_at) VALUES(?,?,?,?,?,?)',
+      event.kind,
+      config.aiModel,
+      event.ok ? 1 : 0,
+      event.latencyMs,
+      event.error instanceof Error ? event.error.message.slice(0, 80) : null,
+      now(),
+    )
+    .catch(() => undefined);
+});
+const model = new ResilientLearningModel(instrumentedModel);
 
-app.get('/api/journey',async(req,reply)=>{try{const s=childSession(req);const d=childDashboard(s.childId!);const longest=(sqlite.prepare("SELECT MAX(COALESCE(b.page_count,0)) n FROM child_books cb JOIN books b ON b.id=cb.book_id WHERE cb.child_id=? AND cb.status='completed'").get(s.childId) as any).n||0;const revisionCount=(sqlite.prepare('SELECT COUNT(*) c FROM journal_revisions jr JOIN journal_entries j ON j.id=jr.journal_id WHERE j.child_id=?').get(s.childId) as any).c;const evidenceCount=(sqlite.prepare("SELECT COUNT(*) c FROM comprehension_attempts ca JOIN journal_entries j ON j.id=ca.journal_id WHERE j.child_id=? AND ca.evidence_present=1").get(s.childId) as any).c;const milestones=[['First book finished',d.stats.booksFinished>=1],['10 journal entries',d.stats.journalEntries>=10],['10,000 words written',d.stats.wordsWritten>=10000],['25 hours reading',d.stats.readingSeconds>=90000],['First 200-page book',longest>=200],['10 purposeful revisions',revisionCount>=10],['10 answers supported with evidence',evidenceCount>=10]].map(([label,earned])=>({label,earned}));return{stats:d.stats,milestones}}catch(e){return safeError(reply,e)}});
+const app = Fastify({ logger: { level: process.env.NODE_ENV === 'production' ? 'info' : 'warn' } });
+await app.register(cookie, { secret: config.cookieSecret, hook: 'onRequest' });
+await app.register(cors, {
+  origin: [config.origin, 'http://127.0.0.1:4173', 'http://localhost:4173'],
+  credentials: true,
+});
 
-app.get('/api/parent/overview',async(req,reply)=>{try{parentSession(req);const childId=Number((req.query as any)?.childId)||Number((sqlite.prepare('SELECT id FROM children ORDER BY id LIMIT 1').get() as any)?.id);const d=childDashboard(childId);const observations=sqlite.prepare('SELECT domain,skill,level,observed_at FROM skill_observations WHERE child_id=? ORDER BY observed_at DESC LIMIT 120').all(childId);const recentSessions=sqlite.prepare(`SELECT rs.started_at,rs.elapsed_seconds,rs.start_page,rs.end_page,b.title FROM reading_sessions rs JOIN child_books cb ON cb.id=rs.child_book_id JOIN books b ON b.id=cb.book_id WHERE rs.child_id=? AND rs.status='complete' ORDER BY rs.started_at DESC LIMIT 30`).all(childId);return{...d,observations,recentSessions}}catch(e){return safeError(reply,e,false)}});
-app.get('/api/parent/evidence',async(req,reply)=>{try{parentSession(req);return{evidence:evidenceRegistry}}catch(e){return safeError(reply,e,false)}});
-app.get('/api/parent/summary',async(req,reply)=>{try{parentSession(req);const childId=Number((req.query as any)?.childId);if(!childId)throw new Error('childId_required');const d=childDashboard(childId);const grouped=sqlite.prepare(`SELECT domain,skill,level,COUNT(*) count FROM skill_observations WHERE child_id=? GROUP BY domain,skill,level ORDER BY domain,skill`).all(childId);return await model.generateParentSummary({structuredFacts:{childName:d.child?.name,stats:d.stats,skillObservations:grouped}})}catch(e){return safeError(reply,e,false)}});
+function constantTimePin(a: string, b: string) {
+  const ah = crypto.createHash('sha256').update(a).digest();
+  const bh = crypto.createHash('sha256').update(b).digest();
+  return crypto.timingSafeEqual(ah, bh);
+}
 
-app.setErrorHandler((error,_req,reply)=>safeError(reply,error));
-const webDist=path.resolve(process.cwd(),'apps/web/dist'); if(fs.existsSync(webDist)){await app.register(fastifyStatic,{root:webDist,prefix:'/'});app.setNotFoundHandler((req,reply)=>{if(req.url.startsWith('/api/'))return reply.code(404).send({error:'Not found'});return reply.sendFile('index.html')});}
-if(process.env.NODE_ENV!=='test'){app.listen({host:config.host,port:config.port}).then(()=>app.log.info(`Leafmark listening on ${config.host}:${config.port}`)).catch(e=>{app.log.error(e);process.exit(1)});}
-export { app, sqlite };
+type Session = { role: 'child' | 'parent'; childId?: number };
+function session(req: FastifyRequest): Session | null {
+  const raw = req.cookies.leafmark_session;
+  if (!raw) return null;
+  const unsigned = req.unsignCookie(raw);
+  if (!unsigned.valid) return null;
+  const [role, id] = unsigned.value.split(':');
+  if (role === 'parent') return { role: 'parent' };
+  if (role === 'child' && Number(id)) return { role: 'child', childId: Number(id) };
+  return null;
+}
+function childSession(req: FastifyRequest) {
+  const s = session(req);
+  if (!s || s.role !== 'child' || !s.childId) throw Object.assign(new Error('child_auth_required'), { statusCode: 401 });
+  return s;
+}
+function parentSession(req: FastifyRequest) {
+  const s = session(req);
+  if (!s || s.role !== 'parent') throw Object.assign(new Error('parent_auth_required'), { statusCode: 401 });
+  return s;
+}
+function safeError(reply: any, error: any, child = true) {
+  const status = Number(error?.statusCode) || 400;
+  return reply.code(status).send({
+    error: child ? 'Something went sideways. Your work is safe. Please try again.' : 'Request could not be completed.',
+    code: process.env.NODE_ENV === 'production' ? undefined : String(error?.message ?? 'unknown'),
+  });
+}
+
+async function ownChildBook(childId: number, id: number, db: SqlDatabase = database) {
+  return db.one<any>(
+    'SELECT cb.*,b.title,b.author,b.cover_url,b.page_count,b.isbn,b.description FROM child_books cb JOIN books b ON b.id=cb.book_id WHERE cb.id=? AND cb.child_id=?',
+    id,
+    childId,
+  );
+}
+async function recordMutation(db: SqlDatabase, childId: number, mutationId: string | undefined, kind: string) {
+  if (!mutationId) return;
+  await db.run(
+    'INSERT INTO sync_mutations(child_id,mutation_id,kind,created_at) VALUES(?,?,?,?) ON CONFLICT(child_id,mutation_id) DO NOTHING',
+    childId,
+    mutationId,
+    kind,
+    now(),
+  );
+}
+function safeQuestionOutput(question: string) {
+  return question.trim().endsWith('?') && !/(the answer is|correct answer|you should say|remember that|obviously|clearly,? the)/i.test(question);
+}
+function safeRevisionOutput(challenge: string) {
+  return !/(you could say|try writing|write this|replace it with|here(?:'s| is) a sentence|example answer)/i.test(challenge);
+}
+async function compactBookMemory(childBookId: number) {
+  const position = await database.one<any>('SELECT current_page,current_chapter,status FROM child_books WHERE id=?', childBookId);
+  const recent = await database.all<any>(
+    `SELECT j.initial_recall,ca.response,ca.skill
+     FROM journal_entries j
+     LEFT JOIN comprehension_attempts ca ON ca.journal_id=j.id
+     WHERE j.child_book_id=?
+     ORDER BY j.created_at DESC LIMIT 3`,
+    childBookId,
+  );
+  return {
+    position,
+    recentStudentMemory: recent.map((r) => ({
+      recall: String(r.initial_recall || '').slice(0, 500),
+      response: String(r.response || '').slice(0, 350),
+      skill: r.skill || null,
+    })),
+  };
+}
+async function childDashboard(childId: number) {
+  const child = await database.one<any>('SELECT id,name FROM children WHERE id=?', childId);
+  const current = await database.one<any>(
+    `SELECT cb.*,b.title,b.author,b.cover_url,b.page_count,b.isbn,
+      (SELECT MAX(end_page) FROM reading_sessions rs WHERE rs.child_book_id=cb.id AND rs.status='complete') AS last_end,
+      (SELECT start_page FROM reading_sessions rs WHERE rs.child_book_id=cb.id ORDER BY rs.started_at DESC LIMIT 1) AS last_start
+     FROM child_books cb JOIN books b ON b.id=cb.book_id
+     WHERE cb.child_id=? AND cb.status='current'
+     ORDER BY cb.started_at DESC LIMIT 1`,
+    childId,
+  );
+  const statsRow = await database.one<any>(
+    `SELECT
+      (SELECT COUNT(*) FROM child_books WHERE child_id=? AND status='completed') AS "booksFinished",
+      (SELECT COALESCE(SUM(elapsed_seconds),0) FROM reading_sessions WHERE child_id=? AND status='complete') AS "readingSeconds",
+      (SELECT COUNT(*) FROM journal_entries WHERE child_id=?) AS "journalEntries"`,
+    childId,
+    childId,
+    childId,
+  );
+  const writings = await database.all<any>('SELECT original_writing,revised_writing FROM journal_entries WHERE child_id=?', childId);
+  const stats = {
+    booksFinished: Number(statsRow?.booksFinished ?? 0),
+    readingSeconds: Number(statsRow?.readingSeconds ?? 0),
+    journalEntries: Number(statsRow?.journalEntries ?? 0),
+    wordsWritten: writings.reduce((n, j) => n + wordCount(j.revised_writing || j.original_writing), 0),
+  };
+  return {
+    child,
+    current: current ? { ...current, pickupPage: current.current_page ?? (current.last_end ? Number(current.last_end) + 1 : 1) } : null,
+    stats,
+  };
+}
+
+app.get('/health', async () => {
+  await database.one('SELECT 1 AS ok');
+  return { ok: true, service: 'leafmark', model: config.aiModel, database: 'postgres' };
+});
+app.get('/api/children', async () => ({ children: await database.all('SELECT id,name FROM children ORDER BY id') }));
+app.post('/api/auth/child', async (req, reply) => {
+  try {
+    const body = z.object({ childId: z.number().int().positive(), pin: z.string().max(16) }).parse(req.body);
+    const child = await database.one<any>('SELECT id,name FROM children WHERE id=?', body.childId);
+    if (!child) throw Object.assign(new Error('not_found'), { statusCode: 404 });
+    const expected = childConfig.get(child.name) ?? '';
+    if (expected && !constantTimePin(body.pin, expected)) throw Object.assign(new Error('bad_pin'), { statusCode: 401 });
+    reply.setCookie('leafmark_session', `child:${child.id}`, {
+      path: '/', httpOnly: true, sameSite: 'strict', signed: true,
+      secure: process.env.NODE_ENV === 'production' && config.origin.startsWith('https:'), maxAge: 60 * 60 * 24 * 30,
+    });
+    return { ok: true, child: { id: child.id, name: child.name } };
+  } catch (e) { return safeError(reply, e); }
+});
+app.post('/api/auth/parent', async (req, reply) => {
+  try {
+    const body = z.object({ pin: z.string().min(4).max(32) }).parse(req.body);
+    if (!constantTimePin(body.pin, config.parentPin)) throw Object.assign(new Error('bad_pin'), { statusCode: 401 });
+    reply.setCookie('leafmark_session', 'parent', {
+      path: '/', httpOnly: true, sameSite: 'strict', signed: true,
+      secure: process.env.NODE_ENV === 'production' && config.origin.startsWith('https:'), maxAge: 60 * 60 * 8,
+    });
+    return { ok: true };
+  } catch (e) { return safeError(reply, e, false); }
+});
+app.post('/api/auth/logout', async (_req, reply) => { reply.clearCookie('leafmark_session', { path: '/' }); return { ok: true }; });
+app.get('/api/auth/me', async (req) => ({ session: session(req) }));
+
+app.get('/api/dashboard', async (req, reply) => {
+  try { const s = childSession(req); return await childDashboard(s.childId!); }
+  catch (e) { return safeError(reply, e); }
+});
+app.get('/api/books', async (req, reply) => {
+  try {
+    const s = childSession(req);
+    const rows = await database.all(
+      `SELECT cb.*,b.title,b.author,b.cover_url,b.page_count,b.isbn,b.description,b.publisher,b.publication_date
+       FROM child_books cb JOIN books b ON b.id=cb.book_id
+       WHERE cb.child_id=?
+       ORDER BY CASE cb.status WHEN 'current' THEN 0 ELSE 1 END, COALESCE(cb.completed_at,cb.started_at) DESC`,
+      s.childId,
+    );
+    return { books: rows };
+  } catch (e) { return safeError(reply, e); }
+});
+app.post('/api/books/lookup', async (req, reply) => {
+  try {
+    childSession(req);
+    const body = z.object({ isbn: z.string().min(9).max(32) }).parse(req.body);
+    const isbn = normalizeIsbn(body.isbn);
+    if (!isValidIsbn(isbn)) return reply.code(422).send({ error: 'That ISBN does not look quite right. Check the number on your book and try again.', invalidIsbn: true });
+    const cached = await database.one<any>('SELECT payload_json FROM metadata_cache WHERE isrn=?', isbn);
+    if (cached) return { book: JSON.parse(cached.payload_json), cached: true };
+    let book;
+    try { book = await metadataProvider.lookup(isbn); }
+    catch { return { book: null, manualFallback: true, lookupUnavailable: true }; }
+    if (!book) return { book: null, manualFallback: true };
+    await database.run(
+      `INSERT INTO metadata_cache(isbn,payload_json,source,cached_at) VALUES(?,?,?,?)
+       ON CONFLICT(isbn) DO UPDATE SET payload_json=EXCLUDED.payload_json,source=EXCLUDED.source,cached_at=EXCLUDED.cached_at`,
+      isbn, JSON.stringify(book), book.source, now(),
+    );
+    return { book, cached: false };
+  } catch (e) { return safeError(reply, e); }
+});
+app.post('/api/books', async (req, reply) => {
+  try {
+    const s = childSession(req);
+    const body = z.object({
+      isbn: z.string(), title: z.string().min(1).max(240), author: z.string().max(240).optional().nullable(),
+      edition: z.string().max(100).optional().nullable(), publisher: z.string().max(180).optional().nullable(),
+      publicationDate: z.string().max(80).optional().nullable(), pageCount: z.number().int().positive().max(10000).optional().nullable(),
+      description: z.string().max(3000).optional().nullable(), coverUrl: z.string().url().optional().nullable(),
+      source: z.string().max(80).default('Manual'),
+    }).parse(req.body);
+    const isbn = normalizeIsbn(body.isbn);
+    if (!isValidIsbn(isbn)) return reply.code(422).send({ error: 'Please check the ISBN and try again.' });
+    const childBookId = await database.transaction(async (tx) => {
+      const book = await tx.one<any>(
+        `INSERT INTO books(isbn,title,author,edition,publisher,publication_date,page_count,description,cover_url,source,created_at)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?)
+         ON CONFLICT(\Ø›Š
