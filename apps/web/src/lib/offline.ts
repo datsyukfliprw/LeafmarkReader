@@ -1,8 +1,9 @@
 import { openDB } from 'idb';
+import { newClientId } from './clientId';
 const dbp=openDB('leafmark-local',1,{upgrade(db){if(!db.objectStoreNames.contains('drafts'))db.createObjectStore('drafts');if(!db.objectStoreNames.contains('queue'))db.createObjectStore('queue',{keyPath:'id'});}});
 export async function saveDraft(key:string,value:any){(await dbp).put('drafts',{...value,savedAt:new Date().toISOString()},key)}
 export async function getDraft<T=any>(key:string){return (await dbp).get('drafts',key) as Promise<T|undefined>}
 export async function clearDraft(key:string){return (await dbp).delete('drafts',key)}
-export async function queueMutation(path:string,body:any){const id=body.mutationId||body.clientId||crypto.randomUUID();await (await dbp).put('queue',{id,path,body:{...body,mutationId:body.mutationId||id},createdAt:Date.now()});return id}
+export async function queueMutation(path:string,body:any){const id=body.mutationId||body.clientId||newClientId();await (await dbp).put('queue',{id,path,body:{...body,mutationId:body.mutationId||id},createdAt:Date.now()});return id}
 export async function flushQueue(){const db=await dbp;const tx=db.transaction('queue','readwrite');let cursor=await tx.store.openCursor();while(cursor){const item=cursor.value;try{const res=await fetch(item.path,{method:'POST',credentials:'include',headers:{'content-type':'application/json'},body:JSON.stringify(item.body)});if(res.ok||res.status===409)await cursor.delete();else break}catch{break}cursor=await cursor.continue();}await tx.done}
 export async function postResilient(path:string,body:any){try{const res=await fetch(path,{method:'POST',credentials:'include',headers:{'content-type':'application/json'},body:JSON.stringify(body)});if(!res.ok){const payload=await res.json().catch(()=>({}));throw Object.assign(new Error(payload.error||'Request failed'),{status:res.status,payload})}return await res.json()}catch(e:any){if(!navigator.onLine||e instanceof TypeError){await queueMutation(path,body);throw Object.assign(new Error('offline_queued'),{offlineQueued:true})}throw e}}
