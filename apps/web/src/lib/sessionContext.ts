@@ -1,4 +1,4 @@
-type SessionContext = { book: unknown; session: { id: string }; startedAtClientMs: number };
+type SessionContext = { book: unknown; session: { id: string | number }; startedAtClientMs: number };
 
 export async function persistSessionContext(
   context: SessionContext,
